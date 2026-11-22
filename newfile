@@ -1,0 +1,318 @@
+#!/bin/sh
+# newfile - create a source file with a small, interactive documentation header
+# POSIX sh; designed to work with BusyBox/Alpine, Linux, WSL, and macOS.
+
+VERSION=1.0.0
+CONFIG_DIR=${XDG_CONFIG_HOME:-"$HOME/.config"}/newfile
+GLOBAL_CONFIG=$CONFIG_DIR/config
+PROJECT_CONFIG=.newfile.conf
+
+usage() {
+    cat <<'USAGE'
+Usage:
+  newfile FILE              Create FILE with a documentation header
+  newfile --config          Set global defaults interactively
+  newfile --show-config     Show global defaults
+  newfile --list-languages  Show supported file extensions/comment styles
+  newfile --version         Show version information
+  newfile --help            Show this help
+
+Project defaults may be stored in .newfile.conf in the current directory.
+Config files use KEY=value lines; values may be quoted.
+USAGE
+}
+
+# Read a simple KEY=value config without sourcing/evaluating it.
+get_config() {
+    cfg_file=$1
+    cfg_key=$2
+    cfg_value=
+    [ -r "$cfg_file" ] || return 0
+    while IFS= read -r cfg_line || [ -n "$cfg_line" ]; do
+        case $cfg_line in
+            "$cfg_key"=*)
+                cfg_value=${cfg_line#*=}
+                # Remove one matching pair of surrounding single/double quotes.
+                case $cfg_value in
+                    \'*\') cfg_value=${cfg_value#\'}; cfg_value=${cfg_value%\'} ;;
+                    \"*\")
+                        cfg_value=${cfg_value#\"}; cfg_value=${cfg_value%\"}
+                        cfg_value=$(printf '%s' "$cfg_value" | sed 's/\\"/"/g; s/\\\\/\\/g')
+                        ;;
+                esac
+                ;;
+        esac
+    done < "$cfg_file"
+}
+
+write_config_value() {
+    # Values are stored as plain text. Newlines are not accepted by the prompts.
+    printf '%s="%s"\n' "$1" "$(printf '%s' "$2" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+}
+
+show_config() {
+    if [ -r "$GLOBAL_CONFIG" ]; then
+        cat "$GLOBAL_CONFIG"
+    else
+        printf 'No global config yet (%s)\n' "$GLOBAL_CONFIG"
+        printf 'Run: newfile --config\n'
+    fi
+}
+
+configure() {
+    mkdir -p "$CONFIG_DIR" || { echo "Cannot create $CONFIG_DIR" >&2; exit 1; }
+    old_author=''; old_org=''
+    old_email= old_github= old_portfolio= old_version=1.0.0 old_license=
+    get_config "$GLOBAL_CONFIG" AUTHOR; [ -n "$cfg_value" ] && old_author=$cfg_value
+    get_config "$GLOBAL_CONFIG" ORGANIZATION; [ -n "$cfg_value" ] && old_org=$cfg_value
+    get_config "$GLOBAL_CONFIG" EMAIL; old_email=$cfg_value
+    get_config "$GLOBAL_CONFIG" GITHUB; old_github=$cfg_value
+    get_config "$GLOBAL_CONFIG" PORTFOLIO; old_portfolio=$cfg_value
+    get_config "$GLOBAL_CONFIG" DEFAULT_VERSION; [ -n "$cfg_value" ] && old_version=$cfg_value
+    get_config "$GLOBAL_CONFIG" DEFAULT_LICENSE; old_license=$cfg_value
+    printf 'Configure global defaults (press Enter to keep the shown value).\n'
+    ask_value AUTHOR 'Author' "$old_author"
+    v_author=$answer
+    ask_value ORGANIZATION 'Organization' "$old_org"
+    v_org=$answer
+    ask_value EMAIL 'Email' "$old_email"
+    v_email=$answer
+    ask_value GITHUB 'GitHub URL' "$old_github"
+    v_github=$answer
+    ask_value PORTFOLIO 'Portfolio URL' "$old_portfolio"
+    v_portfolio=$answer
+    ask_value DEFAULT_VERSION 'Default version' "$old_version"
+    v_version=$answer
+    ask_value DEFAULT_LICENSE 'Default license (optional)' "$old_license"
+    v_license=$answer
+    tmp=$GLOBAL_CONFIG.tmp.$$
+    {
+        write_config_value AUTHOR "$v_author"
+        write_config_value ORGANIZATION "$v_org"
+        write_config_value EMAIL "$v_email"
+        write_config_value GITHUB "$v_github"
+        write_config_value PORTFOLIO "$v_portfolio"
+        write_config_value DEFAULT_VERSION "$v_version"
+        write_config_value DEFAULT_LICENSE "$v_license"
+    } > "$tmp" && mv "$tmp" "$GLOBAL_CONFIG" || { rm -f "$tmp"; echo 'Could not save config.' >&2; exit 1; }
+    chmod 600 "$GLOBAL_CONFIG" 2>/dev/null || :
+    printf 'Saved %s\n' "$GLOBAL_CONFIG"
+}
+
+ask_value() {
+    ask_key=$1
+    ask_label=$2
+    ask_default=$3
+    if [ -n "$ask_default" ]; then
+        printf '%s [%s]: ' "$ask_label" "$ask_default"
+    else
+        printf '%s: ' "$ask_label"
+    fi
+    IFS= read -r answer || answer=
+    [ -n "$answer" ] || answer=$ask_default
+}
+
+list_languages() {
+    cat <<'LIST'
+Extension(s)                         Comment style
+.c .h .cc .cpp .hpp .java .js .ts     /* ... */
+.cs .go .rs .swift .kt .kts .php      /* ... */ or // ...
+.py .sh .bash .zsh .rb .pl .yaml      # ...
+.yml .toml .ini .conf . Makefile      # ...
+.v .sv .svh .vh .jsv                  // ...
+.vhd .vhdl                            -- ...
+.html .htm .xml .svg                  <!-- ... -->
+.css .scss .less                     /* ... */
+.sql .lua                             -- ... / -- ...
+.tcl .mk .S .asm .s                   # ... / ; ...
+Unknown extensions                    # ...
+LIST
+}
+
+comment_style() {
+    ext=${1##*.}
+    ext=$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')
+    case $ext in
+        c|h|cc|hh|cpp|cxx|hpp|hxx|java|js|mjs|cjs|ts|tsx|jsx|cs|go|rs|swift|kt|kts|php|css|scss|less)
+            STYLE=block ;;
+        v|sv|svh|vh|jsv)
+            STYLE=slash ;;
+        vhd|vhdl|sql|lua)
+            STYLE=dash ;;
+        html|htm|xml|svg|xhtml)
+            STYLE=html ;;
+        asm|s|S)
+            STYLE=semi ;;
+        *) STYLE=hash ;;
+    esac
+}
+
+emit_header() {
+    case $STYLE in
+        block)
+            printf '/*\n'
+            printf ' * File: %s\n' "$base"
+            printf ' * Description: %s\n' "$description"
+            printf ' * Project: %s\n' "$project"
+            printf ' * Author: %s\n' "$author"
+            [ -n "$organization" ] && printf ' * Organization: %s\n' "$organization"
+            [ -n "$email" ] && printf ' * Email: %s\n' "$email"
+            [ -n "$github" ] && printf ' * GitHub: %s\n' "$github"
+            [ -n "$portfolio" ] && printf ' * Portfolio: %s\n' "$portfolio"
+            printf ' * Version: %s\n' "$version"
+            printf ' * Created: %s\n' "$created"
+            printf ' * Modified: %s\n' "$created"
+            [ -n "$license" ] && printf ' * License: %s\n' "$license"
+            printf ' *\n * Revision History:\n'
+            printf ' * Date        Version   Description\n'
+            printf ' * %s  %-9s %s\n' "$created" "$version" "$revision"
+            printf ' */\n\n'
+            ;;
+        slash)
+            printf '// File: %s\n// Description: %s\n// Project: %s\n// Author: %s\n' "$base" "$description" "$project" "$author"
+            [ -n "$organization" ] && printf '// Organization: %s\n' "$organization"
+            [ -n "$email" ] && printf '// Email: %s\n' "$email"
+            [ -n "$github" ] && printf '// GitHub: %s\n' "$github"
+            [ -n "$portfolio" ] && printf '// Portfolio: %s\n' "$portfolio"
+            printf '// Version: %s\n// Created: %s\n// Modified: %s\n' "$version" "$created" "$created"
+            [ -n "$license" ] && printf '// License: %s\n' "$license"
+            printf '// Revision History:\n// %s | %s | %s\n\n' "$created" "$version" "$revision"
+            ;;
+        dash)
+            printf '%s\n' "-- File: $base" "-- Description: $description" "-- Project: $project" "-- Author: $author"
+            [ -n "$organization" ] && printf '%s\n' "-- Organization: $organization"
+            [ -n "$email" ] && printf '%s\n' "-- Email: $email"
+            [ -n "$github" ] && printf '%s\n' "-- GitHub: $github"
+            [ -n "$portfolio" ] && printf '%s\n' "-- Portfolio: $portfolio"
+            printf '%s\n' "-- Version: $version" "-- Created: $created" "-- Modified: $created"
+            [ -n "$license" ] && printf '%s\n' "-- License: $license"
+            printf '%s\n' '-- Revision History:' "-- $created | $version | $revision" ''
+            ;;
+        html)
+            printf '<!--\n  File: %s\n  Description: %s\n  Project: %s\n  Author: %s\n' "$base" "$description" "$project" "$author"
+            [ -n "$organization" ] && printf '  Organization: %s\n' "$organization"
+            [ -n "$email" ] && printf '  Email: %s\n' "$email"
+            [ -n "$github" ] && printf '  GitHub: %s\n' "$github"
+            [ -n "$portfolio" ] && printf '  Portfolio: %s\n' "$portfolio"
+            printf '  Version: %s\n  Created: %s\n  Modified: %s\n' "$version" "$created" "$created"
+            [ -n "$license" ] && printf '  License: %s\n' "$license"
+            printf '  Revision History:\n  %s | %s | %s\n-->\n\n' "$created" "$version" "$revision"
+            ;;
+        semi)
+            printf '; File: %s\n; Description: %s\n; Project: %s\n; Author: %s\n' "$base" "$description" "$project" "$author"
+            [ -n "$organization" ] && printf '; Organization: %s\n' "$organization"
+            [ -n "$email" ] && printf '; Email: %s\n' "$email"
+            [ -n "$github" ] && printf '; GitHub: %s\n' "$github"
+            [ -n "$portfolio" ] && printf '; Portfolio: %s\n' "$portfolio"
+            printf '; Version: %s\n; Created: %s\n; Modified: %s\n' "$version" "$created" "$created"
+            [ -n "$license" ] && printf '; License: %s\n' "$license"
+            printf '; Revision History:\n; %s | %s | %s\n\n' "$created" "$version" "$revision"
+            ;;
+        *)
+            printf '# File: %s\n# Description: %s\n# Project: %s\n# Author: %s\n' "$base" "$description" "$project" "$author"
+            [ -n "$organization" ] && printf '# Organization: %s\n' "$organization"
+            [ -n "$email" ] && printf '# Email: %s\n' "$email"
+            [ -n "$github" ] && printf '# GitHub: %s\n' "$github"
+            [ -n "$portfolio" ] && printf '# Portfolio: %s\n' "$portfolio"
+            printf '# Version: %s\n# Created: %s\n# Modified: %s\n' "$version" "$created" "$created"
+            [ -n "$license" ] && printf '# License: %s\n' "$license"
+            printf '# Revision History:\n# %s | %s | %s\n\n' "$created" "$version" "$revision"
+            ;;
+    esac
+}
+
+[ "$#" -gt 0 ] || { usage; exit 2; }
+case $1 in
+    --help|-h) usage; exit 0 ;;
+    --version|-v) printf 'newfile %s\n' "$VERSION"; exit 0 ;;
+    --config) configure; exit $? ;;
+    --show-config) show_config; exit 0 ;;
+    --list-languages) list_languages; exit 0 ;;
+    --*) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
+esac
+[ "$#" -eq 1 ] || { echo 'Please provide exactly one filename.' >&2; usage >&2; exit 2; }
+file=$1
+case $file in */) echo 'Filename cannot be a directory.' >&2; exit 2 ;; esac
+case $file in
+    */*)
+        parent_dir=${file%/*}
+        [ -d "$parent_dir" ] || { echo "Directory does not exist: $parent_dir" >&2; exit 1; }
+        ;;
+esac
+[ ! -e "$file" ] || { echo "Refusing to overwrite existing path: $file" >&2; exit 1; }
+base=${file##*/}
+
+# Project config is read from the current working directory.
+project_cfg=$PROJECT_CONFIG
+
+# Resolve values: project config > global config > built-in default.
+get_value() {
+    key=$1
+    built_in=$2
+    get_config "$GLOBAL_CONFIG" "$key"; global_value=$cfg_value
+    get_config "$project_cfg" "$key"; project_value=$cfg_value
+    if [ -n "$project_value" ]; then resolved=$project_value
+    elif [ -n "$global_value" ]; then resolved=$global_value
+    else resolved=$built_in
+    fi
+}
+
+get_value AUTHOR ''; default_author=$resolved
+get_value ORGANIZATION ''; default_org=$resolved
+get_value EMAIL ''; default_email=$resolved
+get_value GITHUB ''; default_github=$resolved
+get_value PORTFOLIO ''; default_portfolio=$resolved
+get_value DEFAULT_VERSION '1.0.0'; default_version=$resolved
+get_value DEFAULT_LICENSE ''; default_license=$resolved
+get_config "$project_cfg" LICENSE; [ -n "$cfg_value" ] && default_license=$cfg_value
+get_value PROJECT ''; default_project=$resolved
+
+printf 'Creating: %s\n' "$file"
+printf 'Enter the details for the file. Press Enter to accept each default.\n\n'
+ask_value PROJECT 'Project' "$default_project"; project=$answer
+ask_value DESCRIPTION 'Description' ''; description=$answer
+ask_value AUTHOR 'Author' "$default_author"; author=$answer
+ask_value ORGANIZATION 'Organization' "$default_org"; organization=$answer
+ask_value EMAIL 'Email' "$default_email"; email=$answer
+ask_value GITHUB 'GitHub URL' "$default_github"; github=$answer
+ask_value PORTFOLIO 'Portfolio URL' "$default_portfolio"; portfolio=$answer
+ask_value VERSION 'Version' "$default_version"; version=$answer
+ask_value LICENSE 'License' "$default_license"; license=$answer
+ask_value REVISION 'Revision description' 'Initial creation'; revision=$answer
+
+created=$(date '+%Y-%m-%d' 2>/dev/null) || created=unknown
+comment_style "$file"
+
+# Preserve interpreter directives as the first line for executable script types.
+case $file in
+    *.py|*.sh|*.bash|*.zsh|*.rb|*.pl|*.php)
+        case $file in
+            *.py) shebang='#!/usr/bin/env python3' ;;
+            *.rb) shebang='#!/usr/bin/env ruby' ;;
+            *.pl) shebang='#!/usr/bin/env perl' ;;
+            *.php) shebang='#!/usr/bin/env php' ;;
+            *) shebang='#!/bin/sh' ;;
+        esac
+        ;;
+    *) shebang= ;;
+esac
+
+printf '\nFile summary\n------------\n  File: %s\n  Project: %s\n  Description: %s\n  Author: %s\n  Version: %s\n  License: %s\n  Comment style: %s\n' \
+    "$file" "${project:-<not set>}" "${description:-<not set>}" "$author" "$version" "${license:-<not set>}" "$STYLE"
+printf '\nCreate this file? [Y/n] '
+IFS= read -r confirm || confirm=
+case $confirm in n|N|no|NO) echo 'Cancelled.'; exit 0 ;; esac
+
+# noclobber prevents a race from overwriting a file created after the check above.
+if [ -n "$shebang" ]; then
+    { printf '%s\n' "$shebang"; emit_header; } | (set -C; cat > "$file") 2>/dev/null
+else
+    emit_header | (set -C; cat > "$file") 2>/dev/null
+fi
+status=$?
+if [ "$status" -ne 0 ]; then
+    echo "Could not create $file (it may already exist or the directory is not writable)." >&2
+    exit 1
+fi
+case $file in *.sh|*.bash|*.zsh|*.py|*.rb|*.pl) chmod +x "$file" 2>/dev/null || : ;; esac
+printf 'Created %s\n' "$file"
